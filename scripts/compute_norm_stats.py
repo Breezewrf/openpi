@@ -16,9 +16,11 @@ import openpi.training.data_loader as _data_loader
 import openpi.transforms as transforms
 
 
-class RemoveStrings(transforms.DataTransformFn):
+class SelectStatsFields(transforms.DataTransformFn):
+    """Drop images, prompts, and metadata before batching."""
+
     def __call__(self, x: dict) -> dict:
-        return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
+        return {key: x[key] for key in ("state", "actions")}
 
 
 def create_torch_dataloader(
@@ -28,17 +30,29 @@ def create_torch_dataloader(
     model_config: _model.BaseModelConfig,
     num_workers: int,
     max_frames: int | None = None,
+    *,
+    decode_videos: bool = False,
 ) -> tuple[_data_loader.Dataset, int]:
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
-    dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
+    if decode_videos:
+        print("Camera video decoding is enabled.")
+    else:
+        print("Loading numeric fields only; camera videos will not be decoded.")
+    # Norm stats only use state and actions. Tiny placeholder frames preserve the normal embodiment-transform path
+    # without seeking and decoding every camera video for every dataset frame.
+    dataset = _data_loader.create_torch_dataset(
+        data_config,
+        action_horizon,
+        model_config,
+        skip_video_decoding=not decode_videos,
+    )
     dataset = _data_loader.TransformedDataset(
         dataset,
         [
             *data_config.repack_transforms.inputs,
             *data_config.data_transforms.inputs,
-            # Remove strings since they are not supported by JAX and are not needed to compute norm stats.
-            RemoveStrings(),
+            SelectStatsFields(),
         ],
     )
     if max_frames is not None and max_frames < len(dataset):
@@ -53,6 +67,9 @@ def create_torch_dataloader(
         num_workers=num_workers,
         shuffle=shuffle,
         num_batches=num_batches,
+        # Statistics are accumulated on the CPU. Avoid unnecessary JAX device sharding and its requirement that the
+        # batch size be divisible by the number of visible accelerators.
+        framework="pytorch",
     )
     return data_loader, num_batches
 
@@ -69,8 +86,7 @@ def create_rlds_dataloader(
         [
             *data_config.repack_transforms.inputs,
             *data_config.data_transforms.inputs,
-            # Remove strings since they are not supported by JAX and are not needed to compute norm stats.
-            RemoveStrings(),
+            SelectStatsFields(),
         ],
         is_batched=True,
     )
@@ -86,7 +102,7 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None):
+def main(config_name: str, max_frames: int | None = None, *, decode_videos: bool = False):
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
 
@@ -96,7 +112,13 @@ def main(config_name: str, max_frames: int | None = None):
         )
     else:
         data_loader, num_batches = create_torch_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
+            data_config,
+            config.model.action_horizon,
+            config.batch_size,
+            config.model,
+            config.num_workers,
+            max_frames,
+            decode_videos=decode_videos,
         )
 
     keys = ["state", "actions"]

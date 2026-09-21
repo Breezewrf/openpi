@@ -21,23 +21,25 @@ def test_g1_inputs_for_training() -> None:
         "observation/left_wrist_rgb": np.random.rand(3, 480, 640).astype(np.float32),
         "observation/right_wrist_rgb": np.random.rand(3, 480, 640).astype(np.float32),
         "observation/state": np.zeros(30, dtype=np.float32),
-        "actions": np.arange(16 * 34, dtype=np.float32).reshape(16, 34),
+        "actions": np.arange(g1_policy.G1_ACTION_HORIZON * 34, dtype=np.float32).reshape(
+            g1_policy.G1_ACTION_HORIZON, 34
+        ),
         "prompt": b"pick up the red cup",
     }
 
     transformed = g1_policy.G1Inputs()(data)
 
-    assert transformed["actions"].shape == (16, 34)
+    assert transformed["actions"].shape == (g1_policy.G1_ACTION_HORIZON, 34)
     np.testing.assert_array_equal(transformed["actions"], data["actions"])
     assert transformed["prompt"] == "pick up the red cup"
     assert all(image.shape == (480, 640, 3) for image in transformed["image"].values())
 
 
 def test_g1_outputs_preserve_complete_action() -> None:
-    actions = np.arange(16 * 34, dtype=np.float32).reshape(16, 34)
+    actions = np.arange(g1_policy.G1_ACTION_HORIZON * 34, dtype=np.float32).reshape(g1_policy.G1_ACTION_HORIZON, 34)
     transformed = g1_policy.G1Outputs()({"actions": actions})
 
-    assert transformed["actions"].shape == (16, 34)
+    assert transformed["actions"].shape == (g1_policy.G1_ACTION_HORIZON, 34)
     np.testing.assert_array_equal(transformed["actions"], actions)
 
 

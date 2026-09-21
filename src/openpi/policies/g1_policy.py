@@ -8,6 +8,7 @@ from openpi import transforms
 G1_STATE_DIM = 30
 G1_ACTION_DIM = 34
 G1_ARM_ACTION_DIM = 10
+G1_ACTION_HORIZON = 50
 G1_ACTION_GROUP_RANGES = {
     "left_arm": (0, 5),
     "right_arm": (5, 10),

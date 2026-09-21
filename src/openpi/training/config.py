@@ -820,7 +820,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=g1_policy.G1_ACTION_DIM,
-            action_horizon=16,
+            action_horizon=g1_policy.G1_ACTION_HORIZON,
             max_token_len=200,
             discrete_state_input=True,
         ),
@@ -839,6 +839,7 @@ _CONFIGS = [
             decay_lr=2.5e-6,
         ),
         ema_decay=0.999,
+        # Two-device training mesh: 4 samples per device.
         batch_size=8,
         num_workers=4,
         num_train_steps=10_000,
@@ -848,6 +849,7 @@ _CONFIGS = [
             "robot_type": "g1",
             "control_hz": 30,
             "action_dim": g1_policy.G1_ACTION_DIM,
+            "action_horizon": g1_policy.G1_ACTION_HORIZON,
             "action_group_ranges": g1_policy.G1_ACTION_GROUP_RANGES,
         },
     ),
@@ -856,7 +858,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=g1_policy.G1_ACTION_DIM,
-            action_horizon=16,
+            action_horizon=g1_policy.G1_ACTION_HORIZON,
             max_token_len=200,
             discrete_state_input=True,
             paligemma_variant="gemma_2b_lora",
@@ -873,7 +875,7 @@ _CONFIGS = [
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             action_dim=g1_policy.G1_ACTION_DIM,
-            action_horizon=16,
+            action_horizon=g1_policy.G1_ACTION_HORIZON,
             max_token_len=200,
             discrete_state_input=True,
             paligemma_variant="gemma_2b_lora",
@@ -886,6 +888,7 @@ _CONFIGS = [
             decay_steps=10_000,
             decay_lr=2.5e-6,
         ),
+        # Two-device training mesh: 4 samples per device.
         batch_size=8,
         num_workers=4,
         num_train_steps=10_000,
@@ -895,6 +898,7 @@ _CONFIGS = [
             "robot_type": "g1",
             "control_hz": 30,
             "action_dim": g1_policy.G1_ACTION_DIM,
+            "action_horizon": g1_policy.G1_ACTION_HORIZON,
             "action_group_ranges": g1_policy.G1_ACTION_GROUP_RANGES,
         },
     ),

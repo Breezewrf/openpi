@@ -113,9 +113,10 @@ uv run scripts/fix_lerobot_video_timestamps.py \
 pi05_g1_pickup_lora
 ```
 
-该配置同时为 PaliGemma 主干和 action expert 训练 LoRA 参数，action horizon 为 16 帧，即
-`16 / 30 ≈ 0.53` 秒；batch size 为 8，训练 10,000 steps。按照仓库已有的 LoRA 训练方式，该配置关闭
-EMA。
+该配置同时为 PaliGemma 主干和 action expert 训练 LoRA 参数，action horizon 为 50 帧，即
+`50 / 30 ≈ 1.67` 秒；这是当前 OpenPI 配置选择，和原 RoboJuDo GR00T profile 的 16 帧不同。batch size
+为 8，在服务器两张 JAX 设备上每卡分配 4 条；训练 10,000 steps。按照仓库已有的 LoRA 训练方式，该配置
+关闭 EMA。
 
 显存足够且确实需要全量微调时，可使用：
 
@@ -163,7 +164,7 @@ batch size 为 8 时，预期 shape：
 
 ```text
 state:   (8, 34)
-actions: (8, 16, 34)
+actions: (8, 50, 34)
 images:  三个 (8, 224, 224, 3) tensor
 tokens:  (8, 200)
 ```
@@ -181,6 +182,16 @@ OPENPI_DATA_HOME="$OPENPI_DATA_HOME" \
 uv run scripts/compute_norm_stats.py \
   --config-name pi05_g1_pickup_lora
 ```
+
+统计专用管线不会打开或解码 MP4：它仍执行与训练相同的字段映射、50-step action chunk 和双臂 delta
+变换，但用微小占位帧满足 embodiment transform，随后在组成 batch 前删除图像和 prompt。统计在 CPU tensor
+上累计，因此也不再要求 batch size 能被可见 GPU 数量整除。
+
+`--decode-videos` 可用于少数确实会从图像生成 state/action 的自定义 transform；本 G1 transform 不依赖图像，
+不要添加该选项。
+
+action horizon 已从旧配置的 16 改为 50；旧 horizon 生成的 norm stats 不应继续使用。停止尚未完成的旧统计
+进程，然后用当前配置重新运行上述命令。脚本只在完整计算结束时写入结果，中途停止不会产生半成品文件。
 
 LoRA 配置的输出位置是：
 
@@ -260,7 +271,7 @@ observation = {
 图像物理视角和方向必须与训练数据一致。策略响应为：
 
 ```text
-actions: (16, 34) float32 complete RoboJuDo targets
+actions: (50, 34) float32 complete RoboJuDo targets
 ```
 
 如需送入与 GR00T 相同的分组式控制接口，可以直接使用：
@@ -269,12 +280,12 @@ actions: (16, 34) float32 complete RoboJuDo targets
 from openpi.policies import g1_policy
 
 groups = g1_policy.split_action_groups(response["actions"])
-# groups["left_arm"]             (16, 5)
-# groups["right_arm"]            (16, 5)
-# groups["left_hand"]            (16, 10)
-# groups["right_hand"]           (16, 10)
-# groups["navigate_command"]     (16, 3): vx, vy, yaw_rate
-# groups["base_height_command"]  (16, 1): height
+# groups["left_arm"]             (50, 5)
+# groups["right_arm"]            (50, 5)
+# groups["left_hand"]            (50, 10)
+# groups["right_hand"]           (50, 10)
+# groups["navigate_command"]     (50, 3): vx, vy, yaw_rate
+# groups["base_height_command"]  (50, 1): height
 ```
 
 闭环控制初期建议每次只执行前 4～8 个动作，然后重新请求策略。上真机前必须在机器人侧实现关节位置限位、
