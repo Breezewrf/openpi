@@ -55,6 +55,29 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class ShapeAdaptedCheckpointWeightLoader(WeightLoader):
+    """Load a checkpoint while zero-extending selected parameters to new shapes.
+
+    This is useful when an embodiment needs a larger state/action dimension than the released checkpoint. Existing
+    dimensions retain their pretrained values, while newly added rows or columns start at zero and remain trainable.
+    Shape adaptation is deliberately restricted by a full-match regular expression so unrelated architecture
+    mismatches still fail loudly.
+    """
+
+    params_path: str
+    adapt_shape_regex: str
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        return _merge_params(
+            loaded_params,
+            params,
+            missing_regex=".*lora.*",
+            adapt_shape_regex=self.adapt_shape_regex,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 
@@ -73,13 +96,21 @@ class PaliGemmaWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*")
 
 
-def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex: str) -> at.Params:
+def _merge_params(
+    loaded_params: at.Params,
+    params: at.Params,
+    *,
+    missing_regex: str,
+    adapt_shape_regex: str | None = None,
+) -> at.Params:
     """Merges the loaded parameters with the reference parameters.
 
     Args:
         loaded_params: The parameters to merge.
         params: The reference parameters.
         missing_regex: A regex pattern for all missing keys that should be merged from the reference parameters.
+        adapt_shape_regex: A full-match regex for checkpoint arrays that may be copied into a differently shaped
+            reference array. The overlapping values are preserved and any newly introduced entries are zero-filled.
 
     Returns:
         A new dictionary with the merged parameters.
@@ -87,11 +118,20 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
     flat_ref = flax.traverse_util.flatten_dict(params, sep="/")
     flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
 
+    shape_pattern = re.compile(adapt_shape_regex) if adapt_shape_regex is not None else None
+
     # First, take all weights that are a subset of the reference weights.
     result = {}
     for k, v in flat_loaded.items():
         if k in flat_ref:
-            result[k] = v.astype(flat_ref[k].dtype) if v.dtype != flat_ref[k].dtype else v
+            ref = flat_ref[k]
+            loaded_value = v
+            if v.shape != ref.shape and shape_pattern is not None and shape_pattern.fullmatch(k):
+                logger.info("Adapting checkpoint parameter %s from %s to %s", k, v.shape, ref.shape)
+                loaded_value = _zero_extend_array(v, ref.shape)
+            result[k] = (
+                loaded_value.astype(flat_ref[k].dtype) if loaded_value.dtype != flat_ref[k].dtype else loaded_value
+            )
 
     flat_loaded.clear()
 
@@ -102,3 +142,15 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
             result[k] = flat_ref[k]
 
     return flax.traverse_util.unflatten_dict(result, sep="/")
+
+
+def _zero_extend_array(value: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
+    """Copy the overlapping part of an array into a zero-initialized target shape."""
+    if value.ndim != len(target_shape):
+        raise ValueError(f"Cannot adapt rank-{value.ndim} array to shape {target_shape}")
+    if any(target < source for source, target in zip(value.shape, target_shape, strict=True)):
+        raise ValueError(f"Cannot zero-extend shape {value.shape} to smaller shape {target_shape}")
+    result = np.zeros(target_shape, dtype=value.dtype)
+    overlap = tuple(slice(0, min(source, target)) for source, target in zip(value.shape, target_shape, strict=True))
+    result[overlap] = value[overlap]
+    return result
