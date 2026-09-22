@@ -1,10 +1,34 @@
 import dataclasses
+from types import SimpleNamespace
 
 import jax
+import torch
 
 from openpi.models import pi0_config
 from openpi.training import config as _config
 from openpi.training import data_loader as _data_loader
+
+
+def test_lerobot_dataset_without_video_decoding_returns_tiny_placeholders():
+    dataset = object.__new__(_data_loader.LeRobotDatasetWithoutVideoDecoding)
+    dataset.meta = SimpleNamespace(
+        features={
+            "observation.images.head_rgb": {"shape": [480, 640, 3]},
+        }
+    )
+
+    single = dataset._query_videos(  # noqa: SLF001
+        {"observation.images.head_rgb": [0.0]},
+        ep_idx=0,
+    )
+    sequence = dataset._query_videos(  # noqa: SLF001
+        {"observation.images.head_rgb": [0.0, 1 / 30]},
+        ep_idx=0,
+    )
+
+    assert single["observation.images.head_rgb"].shape == (3, 1, 1)
+    assert sequence["observation.images.head_rgb"].shape == (2, 3, 1, 1)
+    assert torch.count_nonzero(single["observation.images.head_rgb"]) == 0
 
 
 def test_torch_data_loader():
@@ -32,6 +56,16 @@ def test_torch_data_loader_infinite():
 
     for _ in range(10):
         _ = next(data_iter)
+
+
+def test_torch_data_loader_pytorch_framework_stays_on_cpu():
+    config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
+    dataset = _data_loader.FakeDataset(config, 4)
+
+    loader = _data_loader.TorchDataLoader(dataset, local_batch_size=4, num_batches=1, framework="pytorch")
+    batch = next(iter(loader))
+
+    assert all(isinstance(x, torch.Tensor) and x.device.type == "cpu" for x in jax.tree.leaves(batch))
 
 
 def test_torch_data_loader_parallel():

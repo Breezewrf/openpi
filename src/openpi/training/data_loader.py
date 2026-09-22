@@ -127,10 +127,38 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class LeRobotDatasetWithoutVideoDecoding(lerobot_dataset.LeRobotDataset):
+    """LeRobot dataset variant that preserves camera keys without opening video files.
+
+    Normalization statistics only consume state and action values, but embodiment transforms generally still expect
+    camera keys to exist. Returning tiny placeholder frames lets those transforms run unchanged while avoiding the
+    expensive and unnecessary MP4 seek/decode performed by ``LeRobotDataset.__getitem__``.
+    """
+
+    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
+        del ep_idx
+        frames = {}
+        for video_key, timestamps in query_timestamps.items():
+            feature = self.meta.features[video_key]
+            shape = feature.get("shape")
+            if not shape or len(shape) != 3:
+                raise ValueError(f"Expected an HWC video shape for {video_key}, got {shape}")
+            channels = int(shape[-1])
+            # LeRobot decoders return float CHW or TCHW arrays. Spatial resolution is irrelevant here because the
+            # normalization pipeline drops images immediately after applying the embodiment transforms.
+            video_frames = torch.zeros((len(timestamps), channels, 1, 1), dtype=torch.float32)
+            frames[video_key] = video_frames.squeeze(0)
+        return frames
+
+
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    skip_video_decoding: bool = False,
 ) -> Dataset:
-    """Create a dataset for training."""
+    """Create a dataset for training or numeric-only statistics."""
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -138,11 +166,13 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
+    dataset_cls = LeRobotDatasetWithoutVideoDecoding if skip_video_decoding else lerobot_dataset.LeRobotDataset
+    dataset = dataset_cls(
         data_config.repo_id,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
+        download_videos=not skip_video_decoding,
     )
 
     if data_config.prompt_from_task:

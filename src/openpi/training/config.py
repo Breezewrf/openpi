@@ -19,6 +19,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.g1_policy as g1_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -32,6 +33,8 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+
+_G1_ACTION_PROJECTION_REGEX = r"(?:action_in_proj/kernel|action_out_proj/(?:kernel|bias))"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -352,6 +355,54 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotG1DataConfig(DataConfigFactory):
+    """Data pipeline for the G1 23-DoF upper-body LeRobot dataset."""
+
+    # RoboJuDo trains arm targets relative to measured arm state. Dexterous-hand, navigation, and base-height
+    # targets remain absolute, matching the GR00T RoboJuDo modality config.
+    use_relative_arm_actions: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/head_rgb": "observation.images.head_rgb",
+                        "observation/left_wrist_rgb": "observation.images.left_wrist_rgb",
+                        "observation/right_wrist_rgb": "observation.images.right_wrist_rgb",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[g1_policy.G1Inputs()],
+            outputs=[g1_policy.G1Outputs()],
+        )
+        if self.use_relative_arm_actions:
+            # A length-10 mask intentionally affects only the two 5-DoF arms. The remaining 24 action dimensions
+            # stay absolute and do not require corresponding state dimensions.
+            delta_action_mask = _transforms.make_bool_mask(g1_policy.G1_ARM_ACTION_DIM)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            # This dataset follows the standard LeRobot singular `action` field name.
+            action_sequence_keys=("action",),
         )
 
 
@@ -760,6 +811,96 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    #
+    # Fine-tuning G1 configs.
+    #
+    TrainConfig(
+        name="pi05_g1_pickup",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=g1_policy.G1_ACTION_DIM,
+            action_horizon=g1_policy.G1_ACTION_HORIZON,
+            max_token_len=200,
+            discrete_state_input=True,
+        ),
+        data=LeRobotG1DataConfig(
+            repo_id="g1_23dof_upper_body_pickup_mulcam_openpi",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.ShapeAdaptedCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            adapt_shape_regex=_G1_ACTION_PROJECTION_REGEX,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=2.5e-5,
+            decay_steps=10_000,
+            decay_lr=2.5e-6,
+        ),
+        ema_decay=0.999,
+        # Two-device training mesh: 4 samples per device.
+        batch_size=8,
+        num_workers=4,
+        num_train_steps=10_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        policy_metadata={
+            "robot_type": "g1",
+            "control_hz": 30,
+            "action_dim": g1_policy.G1_ACTION_DIM,
+            "action_horizon": g1_policy.G1_ACTION_HORIZON,
+            "action_group_ranges": g1_policy.G1_ACTION_GROUP_RANGES,
+        },
+    ),
+    TrainConfig(
+        name="pi05_g1_pickup_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=g1_policy.G1_ACTION_DIM,
+            action_horizon=g1_policy.G1_ACTION_HORIZON,
+            max_token_len=200,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotG1DataConfig(
+            repo_id="g1_23dof_upper_body_pickup_mulcam_openpi",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.ShapeAdaptedCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            adapt_shape_regex=_G1_ACTION_PROJECTION_REGEX,
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=g1_policy.G1_ACTION_DIM,
+            action_horizon=g1_policy.G1_ACTION_HORIZON,
+            max_token_len=200,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=2.5e-5,
+            decay_steps=10_000,
+            decay_lr=2.5e-6,
+        ),
+        # Two-device training mesh: 4 samples per device.
+        batch_size=8,
+        num_workers=4,
+        num_train_steps=10_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        policy_metadata={
+            "robot_type": "g1",
+            "control_hz": 30,
+            "action_dim": g1_policy.G1_ACTION_DIM,
+            "action_horizon": g1_policy.G1_ACTION_HORIZON,
+            "action_group_ranges": g1_policy.G1_ACTION_GROUP_RANGES,
+        },
     ),
     #
     # Fine-tuning Aloha configs.
